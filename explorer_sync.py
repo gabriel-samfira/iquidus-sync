@@ -182,6 +182,7 @@ class Database(object):
                         "txs": txs[-self._txcount:],
                     }
                 )
+        return len(addrs)
 
     def rollback_addresses(self, transactions):
         if type(transactions) is not list:
@@ -605,6 +606,9 @@ class Daemon(object):
         chain_height = self.blockchain_height()
         if int(stats["last"]) == int(chain_height):
             return
+
+        logger.info("Processing new blocks")
+
         diff = int(chain_height) - int(stats["last"])
         last_blk = self._db.get_last_recorded_block()
         last_height = stats["last"]
@@ -612,21 +616,21 @@ class Daemon(object):
         coin_supply = self.get_coin_supply()
         blks = []
         txes = []
+        partial_addrs = 0
         if last_height > 1:
             last_height += 1
+        total_addrs = 0
+        total_blks = 0
+        total_txes = 0
         while last_height <= chain_height:
             blk = self.get_block_at_height(last_height)
             prev_blk = blk.get("previousblockhash")
             if last_blk and last_blk["hash"] != prev_blk:
-                logger.info(
-                    "Recorded block (height: %s) hash: %s "
-                    "Current chain block (height: %s) hash: %s" % (
-                        last_blk["height"], last_blk["hash"],
-                        blk["height"], prev_blk))
                 # chain reorg detected
                 logger.info(
-                    "Reorg detected. Rolling back "
-                    "block %s" % last_blk["height"])
+                    "Reorg detected: %s != %s. Rolling back "
+                    "block %s" % (last_blk["hash"],
+                    prev_blk, last_blk["height"]))
                 self._db.rollback(last_blk["hash"])
                 self._update_stats(last_blk["height"] - 1, coin_supply)
                 raise ReorgException("Chain reorg detected")
@@ -636,9 +640,16 @@ class Daemon(object):
                 logger.info("flushing at block %r" % blk["height"])
                 self._db.db.blocks.insert_many(blks)
                 self._db.update_transactions(txes)
-                self._db.update_addresses(txes)
+                addrs_touched = self._db.update_addresses(txes)
                 self._update_stats(blk["height"], coin_supply)
                 self._db.update_richlist()
+                total_addrs += addrs_touched
+                total_txes += len(txes)
+                total_blks += len(blks)
+                logger.info(
+                    "Partial stats: Number of addresses touched: %d. "
+                    "Number of transactions: %d. "  % (
+                        addrs_touched, len(txes)))
                 blks = []
                 txes = []
             if last_height % 4000 == 0:
@@ -649,10 +660,25 @@ class Daemon(object):
                     {"height": {"$lt": last_height - 2000}})
             last_blk = blk
             last_height += 1
+        logger.info(
+            "Finished updating blocks. Total addresses touched: %d, "
+            "Total blocks processed: %d. Total transactions: %d" % (
+                total_addrs, total_blks, total_txes))
         self._db.update_richlist()
 
     def _has_node(self):
         return shutil.which("node") is not None
+
+    def _stop_process(self, pidfile):
+        if os.path.isfile(pidfile) is False:
+            return
+        pid = open(pidfile).read()
+        try:
+            pid = int(pid)
+            os.kill(pid, 9)
+            os.remove(pidfile)
+        except:
+            return
 
     def _run_peers_sync(self):
         peers = "scripts/peers.js"
@@ -660,7 +686,7 @@ class Daemon(object):
             try:
                 subprocess.check_call(
                     ["node", peers], stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL)
+                    stderr=subprocess.DEVNULL, timeout=10)
             except Exception as err:
                 logger.error("Failed to sync peers: %s" % err)
         else:
@@ -668,12 +694,19 @@ class Daemon(object):
     
     def _run_markets_sync(self):
         sync = "scripts/sync.js"
+        databases = ["index", "market"]
         if self._has_node:
             try:
                 subprocess.check_call(
                     ["node", sync, "market"], stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL)
+                    stderr=subprocess.DEVNULL, timeout=10)
             except Exception as err:
+                try:
+                    for i in databases:
+                        pidfile = "tmp/%s.pid" % i
+                        self._stop_process(pidfile)
+                except:
+                    pass
                 logger.error("Failed to sync markets: %s" % err)
         else:
             logger.warning("nodejs not found. Skipping market sync")
@@ -684,11 +717,8 @@ class Daemon(object):
         self._ensure_blocks_collection_in_sync(stats["last"])
         while True:
             try:
-                logger.info("Processing blocks")
                 self._process_blocks()
-                logger.info("Updating peers information")
                 self._run_peers_sync()
-                logger.info("Updating markets information")
                 self._run_markets_sync()
             except ReorgException:
                 continue
