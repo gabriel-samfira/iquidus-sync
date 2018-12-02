@@ -12,3 +12,9 @@ pip install -r requirements.txt
 ```bash
 ./explorer_sync.py --explorer-config $HOME/explorer/settings.json
 ```
+
+If you prefer to log to file:
+
+```bash
+./explorer_sync.py --explorer-config $HOME/explorer/settings.json --log-file=/tmp/sync.log
+```

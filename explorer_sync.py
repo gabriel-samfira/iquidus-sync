@@ -4,6 +4,7 @@ import argparse
 import jsmin
 import json
 import logging
+import logging.handlers
 import os
 import pymongo
 import shutil
@@ -20,6 +21,8 @@ parser.add_argument('--explorer-config', dest='explorer_config', type=str,
 parser.add_argument('--log-level', dest='loglevel', type=str, default="INFO",
                     help='set log level',
                     choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"])
+parser.add_argument('--log-file', dest='logfile', type=str,
+                    help='log file location')
 
 
 NUM_UNITS = 100000000
@@ -583,7 +586,7 @@ class Daemon(object):
             toInsert.append(self._prepare_block(block))
             if len(toInsert) >= 1000 or i == last_height:
                 # flush to db
-                logging.info(
+                logger.info(
                     "Flushing at height %s. "
                     "Chain height: %s" % (block["height"], last_height))
                 self._db.db.blocks.insert_many(toInsert)
@@ -605,7 +608,7 @@ class Daemon(object):
         diff = int(chain_height) - int(stats["last"])
         last_blk = self._db.get_last_recorded_block()
         last_height = stats["last"]
-        logging.info("Last height is %d" % last_height)
+        logger.info("Last height is %d" % last_height)
         coin_supply = self.get_coin_supply()
         blks = []
         txes = []
@@ -615,13 +618,13 @@ class Daemon(object):
             blk = self.get_block_at_height(last_height)
             prev_blk = blk.get("previousblockhash")
             if last_blk and last_blk["hash"] != prev_blk:
-                logging.info(
+                logger.info(
                     "Recorded block (height: %s) hash: %s "
                     "Current chain block (height: %s) hash: %s" % (
                         last_blk["height"], last_blk["hash"],
                         blk["height"], prev_blk))
                 # chain reorg detected
-                logging.info(
+                logger.info(
                     "Reorg detected. Rolling back "
                     "block %s" % last_blk["height"])
                 self._db.rollback(last_blk["hash"])
@@ -630,7 +633,7 @@ class Daemon(object):
             blks.append(self._prepare_block(blk))
             txes.extend(self.get_block_transactions(blk))
             if last_height % 1000 == 0 or last_height == chain_height:
-                logging.info("flushing at block %r" % blk["height"])
+                logger.info("flushing at block %r" % blk["height"])
                 self._db.db.blocks.insert_many(blks)
                 self._db.update_transactions(txes)
                 self._db.update_addresses(txes)
@@ -639,7 +642,7 @@ class Daemon(object):
                 blks = []
                 txes = []
             if last_height % 4000 == 0:
-                logging.info(
+                logger.info(
                     "Prunning blocks collection older "
                     "than: %d" % (last_height - 2000))
                 self._db.db.blocks.remove(
@@ -659,9 +662,9 @@ class Daemon(object):
                     ["node", peers], stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL)
             except Exception as err:
-                logging.error("Failed to sync peers: %s" % err)
+                logger.error("Failed to sync peers: %s" % err)
         else:
-            logging.warning("nodejs not found. Skipping peers sync")
+            logger.warning("nodejs not found. Skipping peers sync")
     
     def _run_markets_sync(self):
         sync = "scripts/sync.js"
@@ -671,9 +674,9 @@ class Daemon(object):
                     ["node", sync, "market"], stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL)
             except Exception as err:
-                logging.error("Failed to sync markets: %s" % err)
+                logger.error("Failed to sync markets: %s" % err)
         else:
-            logging.warning("nodejs not found. Skipping market sync")
+            logger.warning("nodejs not found. Skipping market sync")
 
     def run(self):
         stats = self._db.get_stats()
@@ -681,25 +684,33 @@ class Daemon(object):
         self._ensure_blocks_collection_in_sync(stats["last"])
         while True:
             try:
-                logging.info("Processing blocks")
+                logger.info("Processing blocks")
                 self._process_blocks()
-                logging.info("Updating peers information")
+                logger.info("Updating peers information")
                 self._run_peers_sync()
-                logging.info("Updating markets information")
+                logger.info("Updating markets information")
                 self._run_markets_sync()
             except ReorgException:
                 continue
             except Exception as err:
-                logging.exception("got exception processing blocks")
+                logger.exception("got exception processing blocks")
             time.sleep(10)
 
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    numeric_level = getattr(logging, args.loglevel)
+    numeric_level = getattr(logging, args.loglevel, logging.INFO)
     log_format = '%(asctime)s %(name)s %(levelname)s %(message)s'
-    logging.basicConfig(
-        level=numeric_level, format=log_format)
+    logger = logging.getLogger('sync')
+    logger.setLevel(numeric_level)
+    formatter = logging.Formatter(log_format)
+    if args.logfile:
+        handler = logging.handlers.RotatingFileHandler(
+              args.logfile, maxBytes=100*1024*1024, backupCount=2)
+    else:
+        handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
     daemon = Daemon(args.explorer_config)
     daemon.run()
