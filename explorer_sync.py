@@ -519,8 +519,9 @@ class Daemon(object):
             return 0
         meth = getattr(self, "_get_coin_supply_%s" % supply_source.lower())
         if meth is None:
-            raise ValueError(
+            logger.warning(
                 "No method to get coin supply for %s" % supply_source)
+            return 0
         return float(meth())
 
     def get_block_transactions(self, blk):
@@ -540,6 +541,8 @@ class Daemon(object):
                 "total" : details["total"],
                 "vout" : details["vout"],
                 "vin" : details["vin"],
+                # not really needed. It is here for compatibility
+                # with sync.js
                 "__v" : 0
             } 
             transactions.append(txInfo)
@@ -607,8 +610,6 @@ class Daemon(object):
         if int(stats["last"]) == int(chain_height):
             return
 
-        logger.info("Processing new blocks")
-
         diff = int(chain_height) - int(stats["last"])
         last_blk = self._db.get_last_recorded_block()
         last_height = stats["last"]
@@ -637,7 +638,7 @@ class Daemon(object):
             blks.append(self._prepare_block(blk))
             txes.extend(self.get_block_transactions(blk))
             if last_height % 1000 == 0 or last_height == chain_height:
-                logger.info("flushing at block %r" % blk["height"])
+                logger.info("commiting to database at block %r" % blk["height"])
                 self._db.db.blocks.insert_many(blks)
                 self._db.update_transactions(txes)
                 addrs_touched = self._db.update_addresses(txes)
@@ -646,10 +647,11 @@ class Daemon(object):
                 total_addrs += addrs_touched
                 total_txes += len(txes)
                 total_blks += len(blks)
-                logger.info(
-                    "Partial stats: Number of addresses touched: %d. "
-                    "Number of transactions: %d. "  % (
-                        addrs_touched, len(txes)))
+                if len(blks) == 1000:
+                    logger.info(
+                        "Partial stats: Number of addresses touched: %d. "
+                        "Number of transactions: %d. "  % (
+                            addrs_touched, len(txes)))
                 blks = []
                 txes = []
             if last_height % 4000 == 0:
