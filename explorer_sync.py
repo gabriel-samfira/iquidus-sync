@@ -336,7 +336,7 @@ class Tx(object):
                     return
                 addr = scrypt.get("addresses")
                 if addr is None:
-                    return
+                    addr = ["no address could be decoded",]
                 return {
                     "addresses": addr[0],
                     "amount": int(i["value"] * NUM_UNITS),
