@@ -2,7 +2,7 @@
 
 import argparse
 import jsmin
-import json
+import simplejson as json
 import logging
 import logging.handlers
 import os
@@ -26,6 +26,15 @@ parser.add_argument('--log-file', dest='logfile', type=str,
 
 
 NUM_UNITS = 100000000
+
+class DecimalEncoder(json.JSONEncoder):
+    def _iterencode(self, o, markers=None):
+        if isinstance(o, decimal.Decimal):
+            # wanted a simple yield str(o) in the next line,
+            # but that would mean a yield on the line with super(...),
+            # which wouldn't work (see my comment below), so...
+            return (str(o) for o in [o])
+        return super(DecimalEncoder, self)._iterencode(o, markers)
 
 
 class ReorgException(Exception):
@@ -131,7 +140,7 @@ class Database(object):
         return addrs
 
     def get_address_info(self, address):
-        addr = self.db.addresses.find_one({"a_id": addr})
+        addr = self.db.addresses.find_one({"a_id": address})
         if addr is None:
             raise ValueError("No such address %s" % address)
         return addr
@@ -264,6 +273,8 @@ class Database(object):
             self.db.blocks.create_index("hash")
         if "txes" in names:
             self.db.txes.create_index("blockhash")
+        if "addresses" in names:
+            self.db.addresses.create_index("a_id")
 
 
 class TxIn(object):
@@ -291,12 +302,13 @@ class TxIn(object):
 
 class Tx(object):
 
-    def __init__(self, tx, cli, height):
+    def __init__(self, tx, cli, height, timestamp):
         self._tx = tx
         self._cli = cli
         self._height = height
         self._vin = None
         self._vout = None
+        self._time = timestamp
 
     def tx_id(self):
         return self._tx["txid"]
@@ -393,7 +405,11 @@ class Tx(object):
             if self._output_is_valid(i) is False:
                 continue
             script = i.get("scriptPubKey", {})
-            addr = script["addresses"][0]
+            addresses = script.get("addresses")
+            if addresses is None:
+                addr = "no address could be decoded"
+            else:
+                addr = addresses[0]
             if addrs.get(addr):
                 addrs[addr] += int(i["value"] * NUM_UNITS)
             else:
@@ -446,7 +462,7 @@ class Tx(object):
             "txid": self.tx_id(),
             "total": total,
             "is_coinbase": is_coinbase, 
-            "timestamp": self._tx["time"],
+            "timestamp": self._time,
         }
         return ret
 
@@ -484,7 +500,17 @@ class Daemon(object):
 
     def call_method(self, method, *args):
         meth = getattr(self._conn, method)
-        return meth(*args)
+        retried = getattr(self, "_retried", False)
+        try:
+            ret = meth(*args)
+            self._retried = False
+            return ret
+        except Exception:
+            if retried:
+                raise
+            self._retried = True
+            self._conn = AuthServiceProxy(self._url)
+            return self.call_method(method, *args)
 
     def blockchain_height(self):
         besthash = self.call_method("getbestblockhash")
@@ -495,7 +521,11 @@ class Daemon(object):
         return self.call_method("getblockhash", height)
 
     def get_block(self, blkHash):
-        blkDetails = self.call_method("getblock", blkHash, True)
+        detailFlag = getattr(self, "_blk_detail_flag_value", True)
+        blkDetails = self.call_method("getblock", blkHash, detailFlag)
+        if type(blkDetails["tx"][0]) is str:
+            self._blk_detail_flag_value = 2
+            return self.get_block(blkHash)
         return blkDetails
 
     def get_block_at_height(self, height):
@@ -531,7 +561,7 @@ class Daemon(object):
             return transactions
         
         for tx in trx:
-            tpayTx = Tx(tx, self, blk["height"])
+            tpayTx = Tx(tx, self, blk["height"], blk["time"])
             details = tpayTx.details()
             txInfo = {
                 "txid" : details["txid"],
@@ -614,7 +644,11 @@ class Daemon(object):
         last_blk = self._db.get_last_recorded_block()
         last_height = stats["last"]
         logger.info("Last height is %d" % last_height)
-        coin_supply = self.get_coin_supply()
+        try:
+            coin_supply = self.get_coin_supply()
+        except Exception as err:
+            logger.warning("Failed to get coin supply: %s" % err)
+            coin_supply = 0
         blks = []
         txes = []
         partial_addrs = 0
