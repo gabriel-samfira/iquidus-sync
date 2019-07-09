@@ -273,6 +273,7 @@ class Database(object):
             self.db.blocks.create_index("hash")
         if "txes" in names:
             self.db.txes.create_index("blockhash")
+            self.db.txes.create_index("txid")
         if "addresses" in names:
             self.db.addresses.create_index("a_id")
 
