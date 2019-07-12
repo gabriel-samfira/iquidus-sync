@@ -703,6 +703,7 @@ class Daemon(object):
                 total_addrs, total_blks, total_txes))
         self._db.update_richlist()
 
+    @property
     def _has_node(self):
         return shutil.which("node") is not None
 
